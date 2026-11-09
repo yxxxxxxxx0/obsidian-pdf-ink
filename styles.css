@@ -32,6 +32,7 @@
 .pdf-ink-page { position: relative; margin: 0 auto 12px; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.2); }
 .pdf-ink-page canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 /* Ink multiplies over the page, so highlighter never hides the text under it. */
-.pdf-ink-page canvas:last-child { touch-action: pan-x pan-y; mix-blend-mode: multiply; }
+.pdf-ink-ink { mix-blend-mode: multiply; }
+.pdf-ink-top { touch-action: pan-x pan-y; }
 .pdf-ink-file { position: fixed; opacity: 0; pointer-events: none; width: 1px; height: 1px; }
 .pdf-ink-stack { width: max-content; min-width: 100%; }

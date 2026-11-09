@@ -17,7 +17,8 @@ const shapeOf = (it: Item) => (isImg(it) ? { points: [[it.x, it.y], [it.x + it.w
 const boxOf = (items: Item[]): Box => extent(items.flatMap((it) => shapeOf(it).points));
 const clone = (it: Item): Item => (isImg(it) ? { ...it } : { ...it, points: it.points.map((q): Pt => [q[0], q[1]]) });
 type Ink = Record<number, Item[]>; // page number -> items, in PDF units (zoom-independent)
-interface Page { n: number; w: number; h: number; pdf: HTMLCanvasElement; img: HTMLCanvasElement; ink: HTMLCanvasElement; drawn: number }
+// live: top layer with only the stroke being drawn, so writing stays fast however full the page is.
+interface Page { n: number; w: number; h: number; pdf: HTMLCanvasElement; img: HTMLCanvasElement; ink: HTMLCanvasElement; live: HTMLCanvasElement; drawn: number }
 // An undoable change: the page's item list before it. Items are never edited in place once saved (moves edit clones),
 // so a shallow copy of the list is a full snapshot.
 interface Edit { n: number; before: Item[] }
@@ -83,6 +84,18 @@ function inkShape(pts: Pt[], size: number, taperEnd: boolean, exact = false): In
   return { mid: new Path2D(svg), d: svg, ends };
 }
 
+function paint(ctx: CanvasRenderingContext2D, st: Stroke, sh: InkShape) {
+  ctx.strokeStyle = st.color;
+  ctx.globalAlpha = st.hl ? st.alpha ?? 0.35 : 1;
+  ctx.lineWidth = st.size;
+  ctx.stroke(sh.mid);
+  for (const [x1, y1, x2, y2, w] of sh.ends) {
+    ctx.lineWidth = w;
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+}
+
 async function pageTexts(doc: any): Promise<string[]> {
   const out: string[] = [];
   for (let n = 1; n <= doc.numPages; n++) {
@@ -106,8 +119,13 @@ class InkView extends FileView {
   color = { pen: "#1a1a1a", highlighter: "#ffd400" };
   size = { pen: load("size-pen", 1.3), highlighter: load("size-highlighter", 10) };
   imgs = new Map<string, HTMLImageElement>();
-  recent: string[] = load("recent", ["#1a1a1a", "#1f5bd6", "#d62828"]);
+  // 5 most recent colours, kept separately for pen and highlighter (per device).
+  recent = {
+    pen: load<string[]>("recent-pen", ["#1a1a1a", "#1f5bd6", "#d62828", "#2a9d3c", "#7b2cbf"]),
+    highlighter: load<string[]>("recent-highlighter", ["#ffd400", "#7cf06b", "#5ec8ff", "#ff8ad8", "#ffa94d"]),
+  };
   hlAlpha: number = load("hl-alpha", 0.35);
+  locked: number | null = load("locked-scale", null); // zoom locked at this scale (per device), or null
   bar!: HTMLElement;
   sizes: { w: number; h: number }[] = [];
   pages: Page[] = [];
@@ -157,7 +175,7 @@ class InkView extends FileView {
       return;
     }
     // Open at the calibrated writing size, so the page is the same size in split screen as full screen.
-    this.scale = savedScale() ?? this.fitScale();
+    this.scale = this.locked ?? savedScale() ?? this.fitScale();
     this.layout();
   }
 
@@ -209,7 +227,7 @@ class InkView extends FileView {
     const ink = this.tool === "highlighter" ? "highlighter" : this.tool === "pen" ? "pen" : null;
     if (ink) {
       sep();
-      for (const c of this.recent) {
+      for (const c of this.recent[ink]) {
         const sw = bar.createDiv({ cls: "pdf-ink-swatch", attr: { "aria-label": c } });
         sw.style.background = c;
         sw.toggleClass("is-active", c === this.color[ink]);
@@ -237,8 +255,16 @@ class InkView extends FileView {
     btn("image-plus", "Insert photo", () => this.pickImage());
 
     bar.createDiv("pdf-ink-spacer");
-    btn("zoom-out", "Zoom out", () => this.setScale(this.scale / 1.1));
-    btn("zoom-in", "Zoom in", () => this.setScale(this.scale * 1.1));
+    if (!this.locked) {
+      btn("zoom-out", "Zoom out", () => this.setScale(this.scale / 1.1));
+      btn("zoom-in", "Zoom in", () => this.setScale(this.scale * 1.1));
+    }
+    btn(this.locked ? "lock" : "unlock", this.locked ? "Unlock page size" : "Lock page size", () => {
+      this.locked = this.locked ? null : this.scale;
+      keep("locked-scale", this.locked);
+      new Notice(this.locked ? "PDF Ink: page size locked." : "PDF Ink: page size unlocked.");
+      this.toolbar();
+    }, !!this.locked);
     btn("more-horizontal", "More", () => {}).onclick = (e) => {
       const m = new Menu();
       m.addItem((i) => i.setTitle("Fit width").setIcon("maximize-2").onClick(() => this.setScale(this.fitScale())));
@@ -264,12 +290,12 @@ class InkView extends FileView {
     r.oninput = () => { lab.setText(fmt(+r.value)); on(+r.value); };
   }
 
-  // Use a colour for the current pen/highlighter and move it to the front of the 3 recent colours.
+  // Use a colour for the current pen/highlighter and move it to the front of that tool's 5 recent colours.
   useColor(c: string) {
     const ink = this.tool === "highlighter" ? "highlighter" : "pen";
     this.color[ink] = c;
-    this.recent = [c, ...this.recent.filter((x) => x !== c)].slice(0, 3);
-    keep("recent", this.recent);
+    this.recent[ink] = [c, ...this.recent[ink].filter((x) => x !== c)].slice(0, 5);
+    keep("recent-" + ink, this.recent[ink]);
     this.toolbar();
   }
 
@@ -306,13 +332,13 @@ class InkView extends FileView {
     this.observer = new IntersectionObserver((es) => es.forEach((e) => {
       const p = this.pages[+(e.target as HTMLElement).dataset.n! - 1];
       if (e.isIntersecting) this.renderPage(p);
-      else for (const c of [p.pdf, p.img, p.ink]) { c.width = c.height = 0; p.drawn = 0; } // free iPad canvas memory
+      else for (const c of [p.pdf, p.img, p.ink, p.live]) { c.width = c.height = 0; p.drawn = 0; } // free iPad canvas memory
     }), { root: this.scroller, rootMargin: "800px" });
     this.sizes.forEach(({ w, h }, i) => {
       const el = this.stack.createDiv({ cls: "pdf-ink-page", attr: { "data-n": String(i + 1) } });
       el.style.width = `${w * this.scale}px`;
       el.style.height = `${h * this.scale}px`;
-      const page = { n: i + 1, w, h, pdf: el.createEl("canvas"), img: el.createEl("canvas"), ink: el.createEl("canvas"), drawn: 0 };
+      const page = { n: i + 1, w, h, pdf: el.createEl("canvas"), img: el.createEl("canvas"), ink: el.createEl("canvas", { cls: "pdf-ink-ink" }), live: el.createEl("canvas", { cls: "pdf-ink-ink pdf-ink-top" }), drawn: 0 };
       this.pages.push(page);
       this.bindPen(page);
       this.observer!.observe(el);
@@ -326,7 +352,7 @@ class InkView extends FileView {
     const gap = (t: Touch[]) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
     this.scroller.addEventListener("touchstart", (e) => {
       const t = fingers(e);
-      if (t.length !== 2) return;
+      if (t.length !== 2 || this.locked) return;
       d0 = gap(t); k = 1;
       const r = this.scroller.getBoundingClientRect();
       f = [(t[0].clientX + t[1].clientX) / 2 - r.left, (t[0].clientY + t[1].clientY) / 2 - r.top]; // focus, in the scroller's box
@@ -351,6 +377,7 @@ class InkView extends FileView {
 
   // Zoom keeping the content under point f (in the scroller's box) in place.
   zoomAt(s: number, f: Pt) {
+    if (this.locked) return;
     const old = this.scale, x = this.scroller.scrollLeft + f[0], y = this.scroller.scrollTop + f[1];
     this.scale = Math.min(5, Math.max(0.3, s));
     this.layout();
@@ -362,6 +389,7 @@ class InkView extends FileView {
   fitScale() { return (this.scroller.clientWidth - 24) / this.sizes[0].w || 1; }
 
   setScale(s: number) {
+    if (this.locked) return new Notice("PDF Ink: page size is locked. Tap the lock to change it.");
     const ratio = this.scroller.scrollTop / this.scroller.scrollHeight;
     this.scale = Math.min(5, Math.max(0.3, s));
     this.layout();
@@ -378,7 +406,7 @@ class InkView extends FileView {
     if (p.drawn === this.scale) return;
     p.drawn = this.scale;
     const r = this.res(p);
-    for (const c of [p.pdf, p.img, p.ink]) { c.width = Math.floor(p.w * r); c.height = Math.floor(p.h * r); }
+    for (const c of [p.pdf, p.img, p.ink, p.live]) { c.width = Math.floor(p.w * r); c.height = Math.floor(p.h * r); }
     const page = await this.doc.getPage(p.n);
     try {
       await page.render({ canvasContext: p.pdf.getContext("2d")!, viewport: page.getViewport({ scale: r }) }).promise;
@@ -386,7 +414,7 @@ class InkView extends FileView {
     this.redrawInk(p);
   }
 
-  redrawInk(p: Page, live?: Stroke) {
+  redrawInk(p: Page) {
     if (!p.drawn) return;
     const r = this.res(p);
     // Photos on their own layer under the ink (the ink layer multiplies, which would make photos see-through).
@@ -404,20 +432,12 @@ class InkView extends FileView {
     ctx.clearRect(0, 0, p.ink.width, p.ink.height);
     ctx.setTransform(r, 0, 0, r, 0, 0);
     ctx.lineCap = ctx.lineJoin = "round";
-    const all = [...(this.ink[p.n] ?? []).filter(isStroke), ...(live ? [live] : [])];
+    const all = (this.ink[p.n] ?? []).filter(isStroke);
     // Highlighter under pen ink; it's drawn as one path, so overlaps within a stroke don't darken.
     for (const st of [...all.filter((x) => x.hl), ...all.filter((x) => !x.hl)]) {
-      let sh = st === live ? undefined : this.paths.get(st);
-      // The end taper only appears once the Pencil lifts, so the tip doesn't shrink while writing.
-      if (!sh) { sh = inkShape(st.points, st.size, st !== live, st.shape || st.hl); if (st !== live) this.paths.set(st, sh); }
-      ctx.strokeStyle = st.color;
-      ctx.globalAlpha = st.hl ? st.alpha ?? 0.35 : 1;
-      ctx.lineWidth = st.size;
-      ctx.stroke(sh.mid);
-      for (const [x1, y1, x2, y2, w] of sh.ends) {
-        ctx.lineWidth = w;
-        ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
-      }
+      let sh = this.paths.get(st);
+      if (!sh) this.paths.set(st, (sh = inkShape(st.points, st.size, true, st.shape || st.hl)));
+      paint(ctx, st, sh);
     }
     ctx.globalAlpha = 1;
     ctx.setLineDash([6 / this.scale, 4 / this.scale]);
@@ -453,8 +473,21 @@ class InkView extends FileView {
     ctx.setLineDash([]);
   }
 
+  // Draw only the stroke in progress on the top layer (or clear it). The end taper appears on lift,
+  // so the tip doesn't shrink while writing.
+  drawLive(p: Page, st: Stroke | null) {
+    if (!p.drawn) return;
+    const ctx = p.live.getContext("2d")!, r = this.res(p);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, p.live.width, p.live.height);
+    if (!st) return;
+    ctx.setTransform(r, 0, 0, r, 0, 0);
+    ctx.lineCap = ctx.lineJoin = "round";
+    paint(ctx, st, inkShape(st.points, st.size, false, st.shape || st.hl));
+  }
+
   bindPen(p: Page) {
-    const c = p.ink;
+    const c = p.live; // top layer receives the Pencil
     let mode: "draw" | "erase" | "lasso" | "move" | "scale" | null = null;
     let cur: Stroke | null = null, before: Edit = { n: p.n, before: [] }, count = 0, moved = false;
     let base: Item[] = [], origin: Pt = [0, 0], d0 = 1; // selection resize
@@ -473,7 +506,7 @@ class InkView extends FileView {
         const c: Pt = [(x0 + x1) / 2, (y0 + y1) / 2];
         snap = { line: shape.line, base: shape.pts, c, r0: Math.max(1, Math.hypot(still[0] - c[0], still[1] - c[1])), a0: Math.atan2(still[1] - c[1], still[0] - c[0]), keys: shape.line ? this.keyPoints(p) : [] };
         cur!.points = shape.pts; cur!.shape = true;
-        this.redrawInk(p, cur!);
+        this.drawLive(p, cur!);
       }, HOLD_MS);
     };
     // Pencil must not scroll; fingers still scroll and pinch.
@@ -556,7 +589,7 @@ class InkView extends FileView {
           moved = true;
         }
       }
-      this.redrawInk(p, cur ?? undefined);
+      if (mode === "draw") this.drawLive(p, cur); else this.redrawInk(p);
     });
     const end = () => {
       window.clearTimeout(hold);
@@ -569,6 +602,7 @@ class InkView extends FileView {
       else if (mode === "lasso") { edited = false; this.select(p); }
       else edited = moved;
       mode = null; cur = null;
+      this.drawLive(p, null);
       if (edited) this.record(before); else this.redrawInk(p);
     };
     c.addEventListener("pointerup", end);

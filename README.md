@@ -4,7 +4,7 @@ Notability-style handwriting on PDFs inside [Obsidian](https://obsidian.md), bui
 
 ## Features
 
-- **Ballpoint pen**: smooth, even-width ink with gently tapered ends; size slider, any colour (picker or hex code), 3 recent colours
+- **Ballpoint pen**: smooth, even-width ink with gently tapered ends; size slider, any colour (picker or hex code), 5 recent colours (separate for pen and highlighter)
 - **Highlighter**: translucent with adjustable opacity, sits under your ink and never hides text
 - **Hold to snap shapes**: draw, hold still, and it becomes a clean line, circle, ellipse, triangle, rectangle or square (equilateral / right-angle / square tidy-up). Keep holding and move to resize and rotate.
 - **Alignment guides**: moved selections snap to other items and the page centre; line ends snap onto corners and endpoints
@@ -12,7 +12,7 @@ Notability-style handwriting on PDFs inside [Obsidian](https://obsidian.md), bui
 - **Undo / redo**
 - **Photos**: insert from the photo library or paste; resize and write on top
 - **Palm rejection**: only the Pencil draws; fingers scroll and pinch-zoom
-- **Writing size calibration**: pages open at the same size in split screen as in full screen
+- **Writing size calibration**: pages open at the same size in split screen as in full screen; lock the page size so nothing can change it
 - **Export** a copy of the PDF with ink and photos built in (vector, text stays selectable)
 - **Import ink** from an older version of a PDF; pages are matched by their text, so inserted/removed slides are handled
 
