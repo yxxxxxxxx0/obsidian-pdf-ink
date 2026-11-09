@@ -1,0 +1,17 @@
+{
+  "name": "obsidian-pdf-ink",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "dev": "node esbuild.config.mjs --watch"
+  },
+  "devDependencies": {
+    "esbuild": "0.24.0",
+    "obsidian": "1.7.2",
+    "typescript": "5.6.3"
+  },
+  "dependencies": {
+    "pdf-lib": "^1.17.1"
+  }
+}
