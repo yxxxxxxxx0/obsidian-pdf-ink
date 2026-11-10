@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { bbox, hitStroke, inPoly, type Pt } from "./geom";
+import { bbox, penModel, hitStroke, inPoly, type Pt } from "./geom";
 
 const line = { points: [[0, 0], [10, 0]] as Pt[], size: 1 };
 assert(hitStroke(line, [5, 2], 2));      // near the middle of the segment
@@ -67,3 +67,16 @@ assert(alignSnap([41, 200, 61, 210], [[0, 0, 100, 20]], 2).gx === 50, "centres a
 assert.deepEqual(extent([[1, 5], [3, 2]]), [1, 2, 3, 5]);
 assert.deepEqual(nearest([10, 10], [[0, 0], [12, 11]], 3), [12, 11]);
 console.log("shapes ok", ends(ln));
+
+// Pen model: a straight line stays straight, the stroke ends exactly at the last point,
+// and a fast right-angle turn (3 far-apart points) is rounded only slightly and drawn densely.
+{
+  const line = penModel([[0, 0], [30, 0]]);
+  assert.ok(line.every(([, y]) => Math.abs(y) < 1e-9));
+  assert.deepEqual(line[line.length - 1], [30, 0]);
+  const turn = penModel([[0, 0], [20, 0], [20, 20]]);
+  for (let i = 1; i < turn.length; i++) assert.ok(Math.hypot(turn[i][0] - turn[i - 1][0], turn[i][1] - turn[i - 1][1]) < 1.5);
+  const cut = Math.min(...turn.map(([x, y]) => Math.hypot(x - 20, y)));
+  assert.ok(cut > 0.3 && cut < 2.5, "corner rounded by " + cut);
+  console.log("pen model ok, corner rounded by", cut.toFixed(2));
+}

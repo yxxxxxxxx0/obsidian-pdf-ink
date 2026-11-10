@@ -21,11 +21,13 @@
 .pdf-ink-range-label { font-size: var(--font-ui-smaller); color: var(--text-muted); min-width: 28px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .pdf-ink-btn.is-disabled { opacity: .35; }
 .pdf-ink-pop {
-  position: absolute; top: 42px; left: 8px; z-index: 10; display: flex; align-items: center; gap: 8px; padding: 8px;
+  position: absolute; top: 42px; left: 8px; z-index: 10; display: flex; flex-direction: column; gap: 8px; padding: 10px;
   background: var(--background-primary); border: 1px solid var(--background-modifier-border);
   border-radius: var(--radius-m); box-shadow: var(--shadow-s);
 }
-.pdf-ink-pop input[type="color"] { width: 36px; height: 30px; padding: 0; border: none; background: none; }
+.pdf-ink-spectrum { display: block; border-radius: var(--radius-s); touch-action: none; cursor: crosshair; }
+.pdf-ink-pop-row { display: flex; align-items: center; gap: 8px; }
+.pdf-ink-pop-row input[type="text"] { flex: 1; }
 .pdf-ink-pop input[type="text"] { width: 90px; font-family: var(--font-monospace); }
 .pdf-ink-pop input.is-invalid { border-color: var(--text-error); }
 .pdf-ink-scroll { touch-action: pan-x pan-y; flex: 1; overflow: auto; background: var(--background-secondary); padding: 12px; -webkit-overflow-scrolling: touch; }
@@ -33,6 +35,18 @@
 .pdf-ink-page canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 /* Ink multiplies over the page, so highlighter never hides the text under it. */
 .pdf-ink-ink { mix-blend-mode: multiply; }
-.pdf-ink-top { touch-action: pan-x pan-y; }
+/* No text selection, callout or drag on the Pencil layer: these make iPadOS hold back the start of a stroke. */
+.pdf-ink-top { touch-action: pan-x pan-y; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-user-drag: none; }
 .pdf-ink-file { position: fixed; opacity: 0; pointer-events: none; width: 1px; height: 1px; }
 .pdf-ink-stack { width: max-content; min-width: 100%; }
+.pdf-ink-pop { padding: 16px 18px; border-radius: 18px; }
+.pdf-ink-pop-head { display: flex; align-items: center; justify-content: space-between; font-weight: 700; font-size: 1.3em; }
+.pdf-ink-rainbow {
+  width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; color: #fff;
+  background: conic-gradient(#5296d6, #8457c9, #d3716e, #a62a21, #de6941, #eac645, #6cd781, #5cc4db, #5296d6);
+}
+.pdf-ink-rainbow svg { width: 20px; height: 20px; stroke-width: 3; }
+.pdf-ink-grid { display: grid; grid-template-columns: repeat(8, 32px); gap: 8px; }
+.pdf-ink-dotbtn { width: 32px; height: 32px; border-radius: 50%; cursor: pointer; position: relative; }
+.pdf-ink-dotbtn.is-active::after { content: "✓"; position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 700; }
+.pdf-ink-custom { display: flex; flex-direction: column; gap: 8px; }

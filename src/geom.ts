@@ -194,3 +194,32 @@ export function nearest(q: Pt, keys: Pt[], tol: number): Pt | null {
   for (const k of keys) { const d = Math.hypot(k[0] - q[0], k[1] - q[1]); if (d <= bd) { bd = d; best = k; } }
   return best;
 }
+
+// Pen model in the style of Google's ink-stroke-modeler: instead of joining the Pencil's points, a pen with
+// a little weight is pulled toward them by a spring and slowed by friction. The path it traces is smooth
+// even when fast writing gives few, far-apart points, and it keeps the shape of sharp turns.
+// The input is first walked in small equal steps, so the result doesn't depend on how often the iPad samples.
+// pull: spring strength per step (higher = follows tighter), drag: velocity kept per step.
+export function penModel(pts: number[][], step = 0.4, pull = 0.18, drag = 0.55): number[][] {
+  if (pts.length < 2) return pts;
+  const target: number[][] = [pts[0]];
+  for (let i = 1; i < pts.length; i++) {
+    const [x0, y0] = pts[i - 1], [x1, y1] = pts[i];
+    const k = Math.ceil(Math.hypot(x1 - x0, y1 - y0) / step);
+    for (let j = 1; j <= k; j++) target.push([x0 + ((x1 - x0) * j) / k, y0 + ((y1 - y0) * j) / k]);
+  }
+  let [x, y] = pts[0], vx = 0, vy = 0;
+  const out: number[][] = [[x, y]];
+  const go = ([tx, ty]: number[]) => {
+    vx = (vx + (tx - x) * pull) * drag; vy = (vy + (ty - y) * pull) * drag;
+    x += vx; y += vy;
+    const [px, py] = out[out.length - 1];
+    if (Math.hypot(x - px, y - py) >= step / 2) out.push([x, y]); // skip near-duplicates
+  };
+  for (const t of target) go(t);
+  // Let the pen catch up with the last Pencil point, so the stroke ends where the Pencil lifted.
+  const last = pts[pts.length - 1];
+  for (let i = 0; i < 60 && Math.hypot(last[0] - x, last[1] - y) > 0.05; i++) go(last);
+  out.push(last);
+  return out;
+}

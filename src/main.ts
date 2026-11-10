@@ -1,7 +1,7 @@
 import { FileView, FuzzySuggestModal, Menu, Notice, setIcon, Plugin, TFile, loadPdfJs, debounce, normalizePath } from "obsidian";
 import { matchPages } from "./match";
 import { BlendMode, LineCapStyle, LineJoinStyle, PDFDocument, rgb, setLineJoin } from "pdf-lib";
-import { alignSnap, bbox, extent, hitStroke, inPoly, nearest, recognize, scaleAbout, snapAngle, snapLine, type Box, type Pt } from "./geom";
+import { alignSnap, bbox, extent, hitStroke, inPoly, nearest, recognize, penModel, scaleAbout, snapAngle, snapLine, type Box, type Pt } from "./geom";
 
 const VIEW_TYPE = "pdf-ink";
 const HOLD_MS = 450;
@@ -34,6 +34,11 @@ const savedScale = () => { try { return Number(localStorage.getItem(SIZE_KEY)) |
 const load = <T,>(k: string, d: T): T => { try { return JSON.parse(localStorage.getItem("pdf-ink-" + k) ?? "") ?? d; } catch { return d; } };
 const keep = (k: string, v: unknown) => { try { localStorage.setItem("pdf-ink-" + k, JSON.stringify(v)); } catch { /* private mode: not remembered */ } };
 const HEX = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i;
+// Notability's "Colors" page 2, read from the user's screenshot (2 rows of 8).
+const PRESETS = [
+  "#eac645", "#be6d2b", "#d3716e", "#a62a21", "#de6941", "#bf436c", "#6cd781", "#53ae94",
+  "#a3bad5", "#5cc4db", "#5296d6", "#464fa7", "#c7c3be", "#535c5d", "#ad9df9", "#8457c9",
+];
 const SIZE_RANGE = { pen: [0.3, 5, 0.1], highlighter: [3, 30, 1] }; // min, max, step (PDF units)
 
 const inkPathOf = (pdfPath: string) => normalizePath(pdfPath + ".ink.json");
@@ -49,20 +54,17 @@ function inkShape(pts: Pt[], size: number, taperEnd: boolean, exact = false): In
     const d = pts.map(([x, y], i) => `${i ? "L" : "M"}${x} ${y}`).join("");
     return { mid: new Path2D(d), d, ends: [] };
   }
-  // Average each point with its neighbours to remove hand jitter.
-  const q = pts.map(([x, y], i) => {
-    const a = pts[i - 1] ?? pts[i], b = pts[i + 1] ?? pts[i];
-    return [(a[0] + 2 * x + b[0]) / 4, (a[1] + 2 * y + b[1]) / 4];
-  });
+  const q = penModel(pts);
   const ends: number[][] = [];
   if (q.length === 1) { const dot = `M${q[0][0]} ${q[0][1]}L${q[0][0] + 0.01} ${q[0][1]}`; return { mid: new Path2D(dot), d: dot, ends }; }
 
   const d = [0];
   for (let i = 1; i < q.length; i++) d.push(d[i - 1] + Math.hypot(q[i][0] - q[i - 1][0], q[i][1] - q[i - 1][1]));
-  const total = d[d.length - 1], T = Math.min(size * 12, total / 3);
-  // Width factor at distance m along the stroke: 0.3 at the tips, 1 after T.
+  // Short taper: a long one left most of a small handwritten letter thinner than the chosen size.
+  const total = d[d.length - 1], T = Math.min(size * 2.5, total / 4);
+  // Width factor at distance m along the stroke: 0.55 at the tips, 1 after T.
   // Smoothstep easing: width grows slowly from the tip and blends into full width with no visible kink.
-  const ease = (t: number) => { t = Math.min(1, Math.max(0, t)); return 0.25 + 0.75 * t * t * (3 - 2 * t); };
+  const ease = (t: number) => { t = Math.min(1, Math.max(0, t)); return 0.55 + 0.45 * t * t * (3 - 2 * t); };
   const f = (m: number) => Math.min(T ? ease(m / T) : 1, taperEnd && T ? ease((total - m) / T) : 1);
 
   let a = -1, b = -1; // first and last full-width segment
@@ -227,13 +229,14 @@ class InkView extends FileView {
     const ink = this.tool === "highlighter" ? "highlighter" : this.tool === "pen" ? "pen" : null;
     if (ink) {
       sep();
-      for (const c of this.recent[ink]) {
+      // 5 fixed colour slots per tool: tap to use, tap the one in use to change its colour.
+      this.recent[ink].forEach((c, i) => {
         const sw = bar.createDiv({ cls: "pdf-ink-swatch", attr: { "aria-label": c } });
         sw.style.background = c;
-        sw.toggleClass("is-active", c === this.color[ink]);
-        sw.onclick = () => this.useColor(c);
-      }
-      btn("plus", "More colours", () => this.colorPicker());
+        const on = c === this.color[ink];
+        sw.toggleClass("is-active", on);
+        sw.onclick = () => (on ? this.colorPicker(i, sw) : this.useColor(c));
+      });
       sep();
       const [mn, mx, st] = SIZE_RANGE[ink];
       const dot = bar.createDiv("pdf-ink-dot");
@@ -290,36 +293,78 @@ class InkView extends FileView {
     r.oninput = () => { lab.setText(fmt(+r.value)); on(+r.value); };
   }
 
-  // Use a colour for the current pen/highlighter and move it to the front of that tool's 5 recent colours.
-  useColor(c: string) {
+  // Use a colour for the current pen/highlighter. With a slot index, also store it in that slot.
+  useColor(c: string, slot?: number) {
     const ink = this.tool === "highlighter" ? "highlighter" : "pen";
     this.color[ink] = c;
-    this.recent[ink] = [c, ...this.recent[ink].filter((x) => x !== c)].slice(0, 5);
-    keep("recent-" + ink, this.recent[ink]);
+    if (slot !== undefined) { this.recent[ink][slot] = c; keep("recent-" + ink, this.recent[ink]); }
     this.toolbar();
   }
 
-  // Popover with the system colour picker (any colour) and a hex code field.
-  colorPicker() {
+  // Popover under a colour slot: a spectrum to tap or drag on (hue across, light to dark down, greys
+  // in the bottom strip) and a hex code field. The slot changes live; tapping outside closes it.
+  colorPicker(slot: number, anchor: HTMLElement) {
     this.contentEl.querySelector(".pdf-ink-pop")?.remove();
     const pop = this.contentEl.createDiv("pdf-ink-pop");
-    const cur = this.color[this.tool === "highlighter" ? "highlighter" : "pen"];
-    const wheel = pop.createEl("input", { type: "color", attr: { "aria-label": "Pick any colour" } });
-    wheel.value = cur;
-    const hex = pop.createEl("input", { type: "text", placeholder: "#1f5bd6", attr: { "aria-label": "Colour code", maxlength: "7" } });
-    hex.value = cur;
-    const done = (c: string) => { this.useColor(c); pop.remove(); };
-    wheel.onchange = () => done(wheel.value);
+    const a = anchor.getBoundingClientRect(), host = this.contentEl.getBoundingClientRect();
+    pop.style.left = `${Math.max(8, Math.min(a.left - host.left - 20, host.width - 270))}px`;
+    // Notability layout: a "Colors" title with a rainbow + (custom colour) on the right, then the preset grid.
+    const head = pop.createDiv("pdf-ink-pop-head");
+    head.createSpan({ text: "Colors" });
+    const plus = head.createDiv({ cls: "pdf-ink-rainbow", attr: { "aria-label": "Custom colour" } });
+    setIcon(plus, "plus");
+    const grid = pop.createDiv("pdf-ink-grid");
+    const marks = PRESETS.map((c) => {
+      const s = grid.createDiv({ cls: "pdf-ink-dotbtn", attr: { "aria-label": c } });
+      s.style.background = c;
+      s.onclick = () => set(c);
+      return s;
+    });
+    const custom = pop.createDiv("pdf-ink-custom");
+    custom.hide();
+    plus.onclick = () => custom.toggle(!custom.isShown());
+    const W = 312, H = 110, G = 18; // spectrum height, grey strip height (CSS px)
+    const cv = custom.createEl("canvas", { cls: "pdf-ink-spectrum" });
+    const dpr = window.devicePixelRatio || 1;
+    cv.width = W * dpr; cv.height = (H + G) * dpr; cv.style.width = `${W}px`; cv.style.height = `${H + G}px`;
+    const ctx = cv.getContext("2d")!;
+    ctx.scale(dpr, dpr);
+    const colorAt = (x: number, y: number) => {
+      x = Math.min(W - 0.01, Math.max(0, x));
+      if (y >= H) return `hsl(0 0% ${Math.round(100 - (100 * x) / W)}%)`;
+      return `hsl(${Math.round((360 * x) / W)} 100% ${Math.round(95 - (90 * Math.max(0, y)) / H)}%)`;
+    };
+    for (let x = 0; x < W; x++) for (let y = 0; y < H + G; y += 2) { ctx.fillStyle = colorAt(x, y); ctx.fillRect(x, y, 1, 2); }
+    const row = custom.createDiv("pdf-ink-pop-row");
+    const prev = row.createDiv("pdf-ink-swatch");
+    const hex = row.createEl("input", { type: "text", placeholder: "#1f5bd6", attr: { "aria-label": "Colour code", maxlength: "7" } });
+    const show = (c: string) => {
+      prev.style.background = c; hex.value = c; hex.removeClass("is-invalid");
+      marks.forEach((m, i) => m.toggleClass("is-active", PRESETS[i] === c));
+    };
+    show(this.recent[this.tool === "highlighter" ? "highlighter" : "pen"][slot]);
+    const set = (c: string) => { show(c); this.useColor(c, slot); };
+    const pick = (e: PointerEvent) => {
+      const r = cv.getBoundingClientRect();
+      ctx.fillStyle = colorAt(e.clientX - r.left, e.clientY - r.top);
+      set(ctx.fillStyle); // canvas normalises hsl() to #rrggbb
+    };
+    cv.onpointerdown = (e) => { cv.setPointerCapture(e.pointerId); pick(e); };
+    cv.onpointermove = (e) => { if (cv.hasPointerCapture(e.pointerId)) pick(e); };
     const apply = () => {
       const m = hex.value.trim().match(HEX);
       if (!m) return hex.addClass("is-invalid");
       let v = m[1].toLowerCase();
       if (v.length === 3) v = [...v].map((x) => x + x).join("");
-      done("#" + v);
+      set("#" + v);
     };
-    hex.onkeydown = (e) => { if (e.key === "Enter") apply(); };
-    pop.createEl("button", { text: "Use", cls: "mod-cta" }).onclick = apply;
-    pop.createDiv({ cls: "clickable-icon", attr: { "aria-label": "Close" } }, (x) => { setIcon(x, "x"); x.onclick = () => pop.remove(); });
+    hex.onkeydown = (e) => { if (e.key === "Enter") { apply(); hex.blur(); } };
+    hex.onblur = () => { if (HEX.test(hex.value.trim())) apply(); };
+    const close = (e: PointerEvent) => {
+      if (pop.contains(e.target as Node)) return;
+      pop.remove(); document.removeEventListener("pointerdown", close, true);
+    };
+    window.setTimeout(() => document.addEventListener("pointerdown", close, true));
   }
 
   // Synchronous on purpose: page sizes are cached, so overlapping zoom taps can't interleave.
@@ -510,25 +555,38 @@ class InkView extends FileView {
       }, HOLD_MS);
     };
     // Pencil must not scroll; fingers still scroll and pinch.
-    const stopStylus = (e: TouchEvent) => { if ((e.touches[0] as any)?.touchType === "stylus") e.preventDefault(); };
-    c.addEventListener("touchstart", stopStylus, { passive: false });
-    c.addEventListener("touchmove", stopStylus, { passive: false });
-    const pt = (e: PointerEvent): Pt => {
+    const pt = (e: { clientX: number; clientY: number }): Pt => {
       const r = c.getBoundingClientRect();
       return [((e.clientX - r.left) / r.width) * p.w, ((e.clientY - r.top) / r.height) * p.h];
     };
+    // iPadOS can deliver the Pencil's touch events well before pointerdown (while it decides whether the
+    // gesture is a scroll or Scribble). Keep those early points so the line starts where the Pencil landed.
+    let early: Pt[] = [], earlyAt = 0;
+    let liveFrame = 0, liveNext: Stroke | null = null;
+    const stopStylus = (e: TouchEvent) => {
+      const t = e.touches[0] as any;
+      if (t?.touchType !== "stylus") return;
+      e.preventDefault();
+      if (e.type === "touchstart") { early = [pt(t)]; earlyAt = e.timeStamp; }
+      else if (!mode && early.length) early.push(pt(t));
+    };
+    c.addEventListener("touchstart", stopStylus, { passive: false });
+    c.addEventListener("touchmove", stopStylus, { passive: false });
     c.addEventListener("pointerdown", (e) => {
       if (e.pointerType === "touch") return; // palm/finger: ignore
       c.setPointerCapture(e.pointerId);
       const q = pt(e);
+      if (e.pointerType !== "pen") early = []; // early touch points are only for the Pencil
       before = this.snap(p);
       count = this.ink[p.n]?.length ?? 0;
       if (this.tool === "pen" || this.tool === "highlighter") {
         const t = this.tool;
         mode = "draw";
-        cur = { points: [q], color: this.color[t], size: this.size[t] };
+        const head = early.length && e.timeStamp - earlyAt < 1000 ? early : [];
+        cur = { points: [...head, q], color: this.color[t], size: this.size[t] };
         if (t === "highlighter") { cur.hl = true; cur.alpha = this.hlAlpha; }
         arm(q);
+        this.drawLive(p, cur); // show ink at once, before the first move
       }
       else if (this.tool === "eraser") { mode = "erase"; this.erase(p, q); }
       else if (this.sel?.p === p && this.corner(q) >= 0) {
@@ -551,7 +609,8 @@ class InkView extends FileView {
     });
     c.addEventListener("pointermove", (e) => {
       if (!mode) return;
-      for (const ce of e.getCoalescedEvents?.() ?? [e]) {
+      const evs = e.getCoalescedEvents?.() ?? [];
+      for (const ce of evs.length ? evs : [e]) {
         const q = pt(ce);
         if (mode === "draw") {
           if (snap) {
@@ -564,7 +623,11 @@ class InkView extends FileView {
             cur!.points = snap.line ? snapLine(snap.base[0], key ?? q, !key) : scaleAbout(snap.base, snap.c, Math.hypot(dx, dy) / snap.r0, rot);
             continue;
           }
-          cur!.points.push(q);
+          // Points under ~1.5 screen px apart are sensor jitter and make the line wobbly: the newest one
+          // replaces the last instead of adding a point, so the tip still follows the Pencil.
+          const ps = cur!.points, n = ps.length;
+          if (n > 1 && Math.hypot(ps[n - 1][0] - ps[n - 2][0], ps[n - 1][1] - ps[n - 2][1]) < 1.5 / this.scale) ps[n - 1] = q;
+          else ps.push(q);
           if (Math.hypot(q[0] - still[0], q[1] - still[1]) > 3 / this.scale) arm(q); // moved >3 screen px: restart the hold timer
         }
         else if (mode === "erase") this.erase(p, q);
@@ -589,7 +652,15 @@ class InkView extends FileView {
           moved = true;
         }
       }
-      if (mode === "draw") this.drawLive(p, cur); else this.redrawInk(p);
+      if (mode === "draw") {
+        // Draw up to where the system predicts the Pencil is going, so the line doesn't trail behind the tip.
+        // Predicted points are only shown, never saved.
+        const ahead = snap ? [] : (e.getPredictedEvents?.() ?? []).map(pt);
+        liveNext = ahead.length ? { ...cur!, points: [...cur!.points, ...ahead] } : cur;
+        // Redraw at most once per screen frame: the Pencil sends up to 240 events a second, and drawing
+        // each one made the line fall behind on fast strokes.
+        if (!liveFrame) liveFrame = requestAnimationFrame(() => { liveFrame = 0; if (liveNext) this.drawLive(p, liveNext); });
+      } else this.redrawInk(p);
     });
     const end = () => {
       window.clearTimeout(hold);
@@ -601,7 +672,8 @@ class InkView extends FileView {
       else if (mode === "erase") edited = (this.ink[p.n]?.length ?? 0) < count;
       else if (mode === "lasso") { edited = false; this.select(p); }
       else edited = moved;
-      mode = null; cur = null;
+      mode = null; cur = null; early = [];
+      cancelAnimationFrame(liveFrame); liveFrame = 0; liveNext = null;
       this.drawLive(p, null);
       if (edited) this.record(before); else this.redrawInk(p);
     };
