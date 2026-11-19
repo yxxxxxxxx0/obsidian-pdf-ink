@@ -137,7 +137,7 @@ class InkView extends FileView {
   scroller!: HTMLElement;
   stack!: HTMLElement; // holds the pages; scaled with CSS during a pinch
   observer?: IntersectionObserver;
-  save = debounce(() => this.writeInk(), 600, true);
+  save = debounce(() => this.writeInk(), 5000, true); // each write is a Sync version of the whole file, so batch strokes
 
   onload() { super.onload(); this.registerDomEvent(document, "paste", (e) => this.onPaste(e)); }
 
@@ -198,7 +198,7 @@ class InkView extends FileView {
   async writeInk() {
     if (!this.file || !this.dirty || !this.canSave) return;
     try {
-      await this.app.vault.adapter.write(inkPathOf(this.file.path), JSON.stringify(this.ink));
+      await this.app.vault.adapter.write(inkPathOf(this.file.path), JSON.stringify(this.ink, (_, v) => typeof v === "number" ? Math.round(v * 100) / 100 : v)); // 0.01 pt is invisible; full floats made the file ~4x bigger
       this.dirty = false;
     } catch (e) {
       new Notice("PDF Ink: couldn't save your drawing!");
