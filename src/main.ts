@@ -41,7 +41,10 @@ const PRESETS = [
 ];
 const SIZE_RANGE = { pen: [0.3, 5, 0.1], highlighter: [3, 30, 1] }; // min, max, step (PDF units)
 
-const inkPathOf = (pdfPath: string) => normalizePath(pdfPath + ".ink.json");
+const inkPathOf = (pdfPath: string) => normalizePath(pdfPath + ".ink.json"); // old single-file format, read once to migrate
+// One file per page, so a save only rewrites (and Sync only versions) the pages that changed.
+const inkDirOf = (pdfPath: string) => normalizePath(pdfPath + ".ink");
+const pageJson = (items: Item[]) => JSON.stringify(items, (_, v) => typeof v === "number" ? Math.round(v * 100) / 100 : v); // 0.01 pt is invisible
 
 // Ballpoint-style ink (like GoodNotes/Notability): even width, curved through the midpoints of
 // lightly smoothed Pencil points, with short tapers at the ends. Built in PDF units, so zoom never rebuilds it.
@@ -115,6 +118,7 @@ class InkView extends FileView {
   sel?: { p: Page; items: Item[] }; // lasso selection
   lasso?: { p: Page; pts: Pt[] }; // lasso loop being drawn
   guides?: { p: Page; x: number | null; y: number | null; pt?: Pt }; // alignment guides shown while dragging
+  written = new Map<string, string>(); // page -> JSON last read/written, to skip unchanged pages
   dirty = false; // only write when this device changed something, so a stale tab can't overwrite newer ink
   canSave = false;
   scale = 1;
@@ -154,10 +158,13 @@ class InkView extends FileView {
     this.undos = [];
     this.redos = [];
     this.dirty = this.canSave = false;
+    this.written = new Map();
 
     try {
-      this.ink = await this.readInk(file.path);
+      this.ink = await this.readInk(file.path, true);
       this.canSave = true;
+      // Migrating from the old single file: write every page once now.
+      if (!this.written.size && Object.values(this.ink).some((p) => p.length)) { this.dirty = true; await this.writeInk(); }
     } catch (e) {
       this.ink = {};
       new Notice("PDF Ink: the saved drawing file is damaged, so saving is off to protect it.");
@@ -190,15 +197,37 @@ class InkView extends FileView {
     this.doc?.destroy();
   }
 
-  async readInk(pdfPath: string): Promise<Ink> {
-    const a = this.app.vault.adapter, p = inkPathOf(pdfPath);
-    return (await a.exists(p)) ? JSON.parse(await a.read(p)) : {};
+  // Reads the per-page folder; falls back to the old single file (kept untouched as a backup).
+  async readInk(pdfPath: string, track = false): Promise<Ink> {
+    const a = this.app.vault.adapter, dir = inkDirOf(pdfPath), old = inkPathOf(pdfPath);
+    if (await a.exists(dir)) {
+      const ink: Ink = {};
+      for (const f of (await a.list(dir)).files) {
+        const n = f.match(/(\d+)\.json$/)?.[1];
+        if (!n) continue;
+        const txt = await a.read(f);
+        ink[+n] = JSON.parse(txt);
+        if (track) this.written.set(n, txt);
+      }
+      return ink;
+    }
+    return (await a.exists(old)) ? JSON.parse(await a.read(old)) : {};
   }
 
   async writeInk() {
     if (!this.file || !this.dirty || !this.canSave) return;
     try {
-      await this.app.vault.adapter.write(inkPathOf(this.file.path), JSON.stringify(this.ink, (_, v) => typeof v === "number" ? Math.round(v * 100) / 100 : v)); // 0.01 pt is invisible; full floats made the file ~4x bigger
+      const a = this.app.vault.adapter, dir = inkDirOf(this.file.path);
+      if (!(await a.exists(dir))) await a.mkdir(dir);
+      const pages = new Set([...Object.keys(this.ink), ...this.written.keys()]);
+      for (const n of pages) {
+        const items = this.ink[+n] ?? [], f = `${dir}/${n}.json`;
+        if (!items.length) { if (this.written.has(n)) { await a.remove(f).catch(() => {}); this.written.delete(n); } continue; }
+        const txt = pageJson(items);
+        if (this.written.get(n) === txt) continue;
+        await a.write(f, txt);
+        this.written.set(n, txt);
+      }
       this.dirty = false;
     } catch (e) {
       new Notice("PDF Ink: couldn't save your drawing!");
@@ -1045,8 +1074,10 @@ export default class PdfInkPlugin extends Plugin {
     }));
     // Keep drawings attached when a PDF is renamed or moved.
     this.registerEvent(this.app.vault.on("rename", async (f, oldPath) => {
-      const a = this.app.vault.adapter, from = inkPathOf(oldPath);
-      if (f instanceof TFile && f.extension === "pdf" && (await a.exists(from))) await a.rename(from, inkPathOf(f.path));
+      if (!(f instanceof TFile) || f.extension !== "pdf") return;
+      const a = this.app.vault.adapter;
+      for (const [from, to] of [[inkDirOf(oldPath), inkDirOf(f.path)], [inkPathOf(oldPath), inkPathOf(f.path)]])
+        if (await a.exists(from)) await a.rename(from, to);
     }));
   }
 }
