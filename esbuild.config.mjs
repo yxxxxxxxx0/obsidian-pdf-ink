@@ -1,6 +1,6 @@
 import esbuild from "esbuild";
 import { copyFileSync, mkdirSync } from "fs";
-const out = process.env.HOME + "/Documents/vault/.obsidian/plugins/pdf-ink";
+const out = process.env.HOME + "/Documents/MY vault/.obsidian/plugins/pdf-ink";
 mkdirSync(out, { recursive: true });
 const copy = () => { for (const f of ["manifest.json", "styles.css"]) copyFileSync(f, `${out}/${f}`); };
 const ctx = await esbuild.context({
