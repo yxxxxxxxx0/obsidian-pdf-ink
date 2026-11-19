@@ -736,7 +736,7 @@ class InkView extends FileView {
         // Redraw at most once per screen frame: the Pencil sends up to 240 events a second, and drawing
         // each one made the line fall behind on fast strokes.
         if (!liveFrame) liveFrame = requestAnimationFrame(() => { liveFrame = 0; if (liveNext) this.drawLive(p, liveNext); });
-      } else this.redrawInk(p);
+      } else if (!liveFrame) liveFrame = requestAnimationFrame(() => { liveFrame = 0; this.redrawInk(p); }); // once per frame, not per event
     });
     const end = () => {
       window.clearTimeout(hold);
@@ -846,7 +846,16 @@ class InkView extends FileView {
   shift(items: Item[], dx: number, dy: number) {
     for (const it of items) {
       if (isImg(it)) { it.x += dx; it.y += dy; }
-      else { for (const q of it.points) { q[0] += dx; q[1] += dy; } this.paths.delete(it); }
+      else {
+        for (const q of it.points) { q[0] += dx; q[1] += dy; }
+        // Move the cached shape instead of rebuilding it: rebuilding every selected stroke on each move made dragging lag.
+        const sh = this.paths.get(it);
+        if (sh) {
+          const mid = new Path2D();
+          mid.addPath(sh.mid, new DOMMatrix([1, 0, 0, 1, dx, dy]));
+          this.paths.set(it, { mid, d: "", ends: sh.ends.map(([a, b, c, d, w]) => [a + dx, b + dy, c + dx, d + dy, w]) }); // d is only used by export, which rebuilds
+        }
+      }
     }
   }
 
