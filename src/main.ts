@@ -1,7 +1,7 @@
-import { FileView, FuzzySuggestModal, Menu, Notice, setIcon, Plugin, TFile, loadPdfJs, debounce, normalizePath } from "obsidian";
+import { FileView, FuzzySuggestModal, Menu, Modal, Notice, setIcon, Plugin, TFile, loadPdfJs, debounce, normalizePath } from "obsidian";
 import { matchPages } from "./match";
 import { BlendMode, LineCapStyle, LineJoinStyle, PDFDocument, rgb, setLineJoin } from "pdf-lib";
-import { alignSnap, bbox, extent, hitStroke, inPoly, nearest, recognize, penModel, scaleAbout, snapAngle, snapLine, type Box, type Pt } from "./geom";
+import { alignSnap, collapseStraight, bbox, extent, hitStroke, inPoly, nearest, recognize, penModel, scaleAbout, snapAngle, snapLine, type Box, type Pt } from "./geom";
 
 const VIEW_TYPE = "pdf-ink";
 const HOLD_MS = 450;
@@ -51,7 +51,7 @@ const boxPoly = ([x0, y0, x1, y1]: number[]): Pt[] => [[x0, y0], [x1, y0], [x1, 
 
 function inkShape(pts: Pt[], size: number, taperEnd: boolean, exact = false): InkShape {
   if (exact) {
-    const d = pts.map(([x, y], i) => `${i ? "L" : "M"}${x} ${y}`).join("");
+    const d = collapseStraight(pts).map(([x, y], i) => `${i ? "L" : "M"}${x} ${y}`).join("");
     return { mid: new Path2D(d), d, ends: [] };
   }
   const q = penModel(pts);
@@ -109,7 +109,7 @@ async function pageTexts(doc: any): Promise<string[]> {
 
 class InkView extends FileView {
   ink: Ink = {};
-  tool: "pen" | "highlighter" | "eraser" | "lasso" = "pen";
+  tool: "view" | "pen" | "highlighter" | "eraser" | "lasso" = "pen";
   undos: Edit[] = []; // this session only (not saved)
   redos: Edit[] = [];
   sel?: { p: Page; items: Item[] }; // lasso selection
@@ -120,6 +120,7 @@ class InkView extends FileView {
   scale = 1;
   color = { pen: "#1a1a1a", highlighter: "#ffd400" };
   size = { pen: load("size-pen", 1.3), highlighter: load("size-highlighter", 10) };
+  eraserSize = load("size-eraser", 10); // radius in screen px, so it feels the same at any zoom
   imgs = new Map<string, HTMLImageElement>();
   // 5 most recent colours, kept separately for pen and highlighter (per device).
   recent = {
@@ -221,6 +222,7 @@ class InkView extends FileView {
     const sep = () => bar.createDiv("pdf-ink-sep");
     const setTool = (t: InkView["tool"]) => { this.tool = t; this.sel = undefined; this.pages.forEach((q) => this.redrawInk(q)); this.toolbar(); };
 
+    btn("eye", "View only (tap links)", () => setTool("view"), this.tool === "view");
     btn("pen", "Pen", () => setTool("pen"), this.tool === "pen");
     btn("highlighter", "Highlighter", () => setTool("highlighter"), this.tool === "highlighter");
     btn("eraser", "Eraser", () => setTool("eraser"), this.tool === "eraser");
@@ -245,6 +247,7 @@ class InkView extends FileView {
       this.slider("Size", mn, mx, st, this.size[ink], (v) => v.toFixed(st < 1 ? 1 : 0), (v) => { this.size[ink] = v; keep("size-" + ink, v); showDot(); });
       if (ink === "highlighter") this.slider("Opacity", 10, 90, 1, Math.round(this.hlAlpha * 100), (v) => `${v}%`, (v) => { this.hlAlpha = v / 100; keep("hl-alpha", this.hlAlpha); });
     }
+    if (this.tool === "eraser") { sep(); this.slider("Size", 4, 60, 1, this.eraserSize, (v) => `${v}`, (v) => { this.eraserSize = v; keep("size-eraser", v); }); }
     sep();
     btn("undo-2", "Undo", () => this.undo()).toggleClass("is-disabled", !this.undos.length);
     btn("redo-2", "Redo", () => this.redo()).toggleClass("is-disabled", !this.redos.length);
@@ -268,6 +271,7 @@ class InkView extends FileView {
       new Notice(this.locked ? "PDF Ink: page size locked." : "PDF Ink: page size unlocked.");
       this.toolbar();
     }, !!this.locked);
+    btn("file-search", "Go to page", () => this.askPage());
     btn("more-horizontal", "More", () => {}).onclick = (e) => {
       const m = new Menu();
       m.addItem((i) => i.setTitle("Fit width").setIcon("maximize-2").onClick(() => this.setScale(this.fitScale())));
@@ -284,6 +288,48 @@ class InkView extends FileView {
       m.addItem((i) => i.setTitle("Import ink from another PDF…").setIcon("file-input").onClick(() => this.pickSource()));
       m.showAtMouseEvent(e);
     };
+  }
+
+  // Ask for a page number and scroll so that page's top is at the top of the view.
+  askPage() {
+    const m = new Modal(this.app);
+    m.titleEl.setText(`Go to page (1–${this.pages.length})`);
+    const inp = m.contentEl.createEl("input", { type: "number", attr: { min: "1", max: String(this.pages.length), inputmode: "numeric" } });
+    inp.style.width = "100%";
+    const go = () => {
+      const n = Math.round(+inp.value);
+      if (!(n >= 1 && n <= this.pages.length)) { new Notice(`PDF Ink: enter a page from 1 to ${this.pages.length}.`); return; }
+      m.close();
+      this.goToPage(n);
+    };
+    inp.onkeydown = (e) => { if (e.key === "Enter") go(); };
+    m.contentEl.createEl("button", { text: "Go", cls: "mod-cta" }).onclick = go;
+    m.open();
+    inp.focus();
+  }
+
+  goToPage(n: number, y = 0) {
+    const el = this.pages[n - 1]?.pdf.parentElement;
+    if (!el) return;
+    this.scroller.scrollTop += el.getBoundingClientRect().top - this.scroller.getBoundingClientRect().top + y * this.scale;
+  }
+
+  // View mode: follow the PDF link under q (page coords): internal links scroll, web links open.
+  async followLink(p: Page, q: Pt) {
+    const page = await this.doc.getPage(p.n), vp = page.getViewport({ scale: 1 });
+    for (const a of await page.getAnnotations()) {
+      if (a.subtype !== "Link") continue;
+      const [x0, y0, x1, y1] = vp.convertToViewportRectangle(a.rect);
+      if (q[0] < Math.min(x0, x1) || q[0] > Math.max(x0, x1) || q[1] < Math.min(y0, y1) || q[1] > Math.max(y0, y1)) continue;
+      if (a.url) { window.open(a.url); return; }
+      const dest = typeof a.dest === "string" ? await this.doc.getDestination(a.dest) : a.dest;
+      if (!Array.isArray(dest)) return;
+      const i = typeof dest[0] === "number" ? dest[0] : await this.doc.getPageIndex(dest[0]);
+      // XYZ destinations carry a top y in PDF space; convert to a page offset.
+      const top = dest[1]?.name === "XYZ" && typeof dest[3] === "number" ? (await this.doc.getPage(i + 1)).getViewport({ scale: 1 }).convertToViewportPoint(0, dest[3])[1] : 0;
+      this.goToPage(i + 1, Math.max(0, top - 10));
+      return;
+    }
   }
 
   slider(label: string, min: number, max: number, step: number, val: number, fmt: (v: number) => string, on: (v: number) => void) {
@@ -565,15 +611,16 @@ class InkView extends FileView {
     let liveFrame = 0, liveNext: Stroke | null = null;
     const stopStylus = (e: TouchEvent) => {
       const t = e.touches[0] as any;
-      if (t?.touchType !== "stylus") return;
+      if (t?.touchType !== "stylus" || this.tool === "view") return;
       e.preventDefault();
       if (e.type === "touchstart") { early = [pt(t)]; earlyAt = e.timeStamp; }
       else if (!mode && early.length) early.push(pt(t));
     };
     c.addEventListener("touchstart", stopStylus, { passive: false });
     c.addEventListener("touchmove", stopStylus, { passive: false });
+    c.addEventListener("click", (e) => { if (this.tool === "view") this.followLink(p, pt(e)); });
     c.addEventListener("pointerdown", (e) => {
-      if (e.pointerType === "touch") return; // palm/finger: ignore
+      if (e.pointerType === "touch" || this.tool === "view") return; // palm/finger: ignore; view mode: let taps through
       c.setPointerCapture(e.pointerId);
       const q = pt(e);
       if (e.pointerType !== "pen") early = []; // early touch points are only for the Pencil
@@ -707,8 +754,16 @@ class InkView extends FileView {
 
   // shortcut: erases when the eraser circle touches any stroke point-by-point; a very fast swipe could skip a thin stroke.
   erase(p: Page, q: Pt) {
-    const r = 10 / this.scale; // ~10 screen px; photos are never erased, use lasso + delete
+    const r = this.eraserSize / this.scale; // screen px; photos are never erased, use lasso + delete
     this.ink[p.n] = (this.ink[p.n] ?? []).filter((s) => isImg(s) || !hitStroke(s, q, r));
+    // Show the eraser circle on the top layer; pen-up clears it via drawLive(p, null).
+    const ctx = p.live.getContext("2d")!, k = this.res(p);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, p.live.width, p.live.height);
+    ctx.setTransform(k, 0, 0, k, 0, 0);
+    ctx.beginPath(); ctx.arc(q[0], q[1], r, 0, 2 * Math.PI);
+    ctx.lineWidth = 1 / this.scale; ctx.strokeStyle = "#888"; ctx.fillStyle = "rgba(136,136,136,0.15)";
+    ctx.fill(); ctx.stroke();
   }
 
   // Select anything the lasso loop touches: a stroke with any point inside, a photo overlapping the loop.
@@ -876,7 +931,11 @@ class InkView extends FileView {
       const el = (im = new Image());
       el.onload = () => this.pages.forEach((q) => this.redrawInk(q));
       this.imgs.set(path, el);
+      // A photo moved to another folder is found again by its file name.
+      const name = path.split("/").pop();
+      const moved = () => this.app.vault.getFiles().find((f) => f.name === name)?.path ?? path;
       this.app.vault.adapter.readBinary(path)
+        .catch(() => this.app.vault.adapter.readBinary(moved()))
         .then((b) => { el.src = URL.createObjectURL(new Blob([b])); })
         .catch((e) => console.error("PDF Ink: missing photo", path, e));
     }

@@ -56,6 +56,20 @@ function densify(poly: Pt[], step = 1): Pt[] {
   return out;
 }
 
+// Drop points that lie on the straight line between their neighbours, so a densified straight
+// edge is drawn as one segment (hundreds of tiny joins showed as breaks in a translucent stroke).
+export function collapseStraight(pts: Pt[], tol = 0.05): Pt[] {
+  if (pts.length < 3) return pts;
+  const out: Pt[] = [pts[0]];
+  for (let i = 1; i < pts.length - 1; i++) {
+    const a = out[out.length - 1], b = pts[i + 1], p = pts[i], L = dist(a, b);
+    const off = L ? Math.abs((b[0] - a[0]) * (a[1] - p[1]) - (a[0] - p[0]) * (b[1] - a[1])) / L : dist(a, p);
+    if (off > tol) out.push(p);
+  }
+  out.push(pts[pts.length - 1]);
+  return out;
+}
+
 // Straight line from a towards b, snapped to multiples of 45° when within 2°.
 export function snapLine(a: Pt, b: Pt, angleSnap = true): Pt[] {
   const chord = dist(a, b);

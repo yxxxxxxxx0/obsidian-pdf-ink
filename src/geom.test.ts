@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { bbox, penModel, hitStroke, inPoly, type Pt } from "./geom";
+import { bbox, collapseStraight, penModel, hitStroke, inPoly, type Pt } from "./geom";
 
 const line = { points: [[0, 0], [10, 0]] as Pt[], size: 1 };
 assert(hitStroke(line, [5, 2], 2));      // near the middle of the segment
@@ -79,4 +79,12 @@ console.log("shapes ok", ends(ln));
   const cut = Math.min(...turn.map(([x, y]) => Math.hypot(x - 20, y)));
   assert.ok(cut > 0.3 && cut < 2.5, "corner rounded by " + cut);
   console.log("pen model ok, corner rounded by", cut.toFixed(2));
+}
+
+{
+  const line = snapLine([0, 0], [400, 3]);
+  assert.equal(collapseStraight(line).length, 2, "straight line becomes one segment");
+  const sq: Pt[] = [[0, 0], [5, 0], [10, 0], [10, 5], [10, 10]];
+  assert.deepEqual(collapseStraight(sq), [[0, 0], [10, 0], [10, 10]], "corners kept");
+  console.log("collapseStraight ok");
 }
